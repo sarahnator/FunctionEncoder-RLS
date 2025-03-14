@@ -164,3 +164,6 @@ experimental_logs/
 data/
 
 pypi_instructions.md
+
+# VSCode
+.vscode/

@@ -1,3 +1,7 @@
+"""
+PYTHONPATH=. python Examples/RLSQuadraticExample.py
+"""
+
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -12,7 +16,7 @@ import argparse
 
 # parse args
 parser = argparse.ArgumentParser()
-parser.add_argument("--n_basis", type=int, default=11)
+parser.add_argument("--n_basis", type=int, default=3)
 parser.add_argument("--train_method", type=str, default="least_squares")
 parser.add_argument("--epochs", type=int, default=1_000)
 parser.add_argument("--load_path", type=str, default=None)
@@ -96,7 +100,7 @@ else:
 with torch.no_grad():
     example_xs, example_ys, query_xs, query_ys, sample_info = dataset.sample()
     function_idx = 3  # choose one of the functions
-    print(f'Function {function_idx} A: {sample_info["As"][function_idx]}, B: {sample_info["Bs"][function_idx]}, C: {sample_info["Cs"][function_idx]}')
+    # print(f'Function {function_idx} A: {sample_info["As"][function_idx]}, B: {sample_info["Bs"][function_idx]}, C: {sample_info["Cs"][function_idx]}')
     n = 100
     example_xs = example_xs[function_idx, :n]
     example_ys = example_ys[function_idx, :n]
@@ -113,11 +117,17 @@ with torch.no_grad():
     true_coefficients, G = model.compute_representation(
         example_xs.unsqueeze(0).to(device), example_ys.unsqueeze(0).to(device)
     )
-    distance = torch.norm(coefficient_iterates[-1] - true_coefficients, p=2)
+    true_coefficients = true_coefficients.view(-1)
+    rls_coefficients = coefficient_iterates[-1].view(-1)
+    distance = torch.norm(rls_coefficients - true_coefficients, p=2)
     print(f"Distance from iterative solution to the true solution: {distance.item()}")
+    print(f"True coefficients: {true_coefficients.cpu().numpy()}")
+    print(f"RLS coefficients: {rls_coefficients.cpu().numpy()}")
+    # print(f"Shape of the RLS coefficients: {rls_coefficients.shape}")
+    # print(f"Shape of the true coefficients: {true_coefficients.shape}")
 
-    # Subsample the coefficient iterates to reduce the number of frames
-    subsample_factor = 1  # Adjust this factor as needed
+    # Subsample the coefficient iterates to reduce the number of frames if needed
+    subsample_factor = 1  # No subsampling if set to 1
     subsampled_iterates = coefficient_iterates[::subsample_factor]
     query_xs, indicies = torch.sort(query_xs, dim=-2)
     query_ys = query_ys.gather(dim=-2, index=indicies)
@@ -126,7 +136,7 @@ with torch.no_grad():
     fig, ax = plt.subplots()
     true_line, = ax.plot(query_xs.cpu(), query_ys.cpu(), label="True", color="blue")
     # Initialize predicted line with the first iterate
-    y_hat_initial = model.predict(query_xs.unsqueeze(0), subsampled_iterates[0].T).squeeze(0).cpu()
+    y_hat_initial = model.predict(query_xs.unsqueeze(0), subsampled_iterates[0].reshape(1, n_basis)).squeeze(0).cpu()
     pred_line, = ax.plot(query_xs.cpu(), y_hat_initial, label="Predicted", color="orange")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
@@ -142,4 +152,4 @@ with torch.no_grad():
 
     ani = animation.FuncAnimation(fig, update, frames=len(subsampled_iterates),
                                   interval=100, blit=True, repeat_delay=500)
-    ani.save(f"{logdir}/rls.mp4", writer="ffmpeg")
+    ani.save(f"{logdir}/rls_func_{function_idx}.mp4", writer="ffmpeg")

@@ -9,7 +9,7 @@ import torch
 import numpy as np
 import matplotlib.animation as animation
 
-from FunctionEncoder import QuadraticDataset, RecursiveFunctionEncoder, MSECallback, ListCallback, TensorboardCallback, DistanceCallback
+from FunctionEncoder import QuadraticDataset, WRRLSFunctionEncoder, MSECallback, ListCallback, TensorboardCallback, DistanceCallback
 
 import argparse
 
@@ -56,11 +56,11 @@ dataset = QuadraticDataset(a_range=a_range, b_range=b_range, c_range=c_range, in
 # RLS parameters 
 init_coefficients = torch.zeros((n_basis, 1), device=device)
 forgetting_factor = 1
-delta = 1e3
+alpha = 1e-3
 
 if load_path is None:
     # create the model
-    model = RecursiveFunctionEncoder(input_size=dataset.input_size,
+    model = WRRLSFunctionEncoder(input_size=dataset.input_size,
                             output_size=dataset.output_size,
                             data_type=dataset.data_type,
                             n_basis=n_basis,
@@ -68,7 +68,7 @@ if load_path is None:
                             method=train_method,
                             use_residuals_method=residuals,
                             forgetting_factor=forgetting_factor,
-                            delta=delta,
+                            alpha=alpha,
                             init_coefficients=init_coefficients).to(device)
     print('Number of parameters:', sum(p.numel() for p in model.parameters()))
 
@@ -84,7 +84,7 @@ if load_path is None:
     torch.save(model.state_dict(), f"{logdir}/model.pth")
 else:
     # load the model
-    model = RecursiveFunctionEncoder(input_size=dataset.input_size,
+    model = WRRLSFunctionEncoder(input_size=dataset.input_size,
                             output_size=dataset.output_size,
                             data_type=dataset.data_type,
                             n_basis=n_basis,
@@ -92,14 +92,14 @@ else:
                             method=train_method,
                             use_residuals_method=residuals,
                             forgetting_factor=forgetting_factor,
-                            delta=delta,
+                            alpha=alpha,
                             init_coefficients=init_coefficients).to(device)
     model.load_state_dict(torch.load(f"{logdir}/model.pth"))
 
 # RLS with subsampled iterates for efficiency
 with torch.no_grad():
     example_xs, example_ys, query_xs, query_ys, sample_info = dataset.sample()
-    function_idx = 3  # choose one of the functions
+    function_idx = 1  # choose one of the functions
     # print(f'Function {function_idx} A: {sample_info["As"][function_idx]}, B: {sample_info["Bs"][function_idx]}, C: {sample_info["Cs"][function_idx]}')
     n = 100
     example_xs = example_xs[function_idx, :n]

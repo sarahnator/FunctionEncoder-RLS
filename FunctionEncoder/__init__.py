@@ -1,6 +1,7 @@
 
 from FunctionEncoder.Model.FunctionEncoder import FunctionEncoder
-from FunctionEncoder.Model.RecursiveFunctionEncoder import RecursiveFunctionEncoder
+from FunctionEncoder.Model.WRLSFunctionEncoder import WRLSFunctionEncoder
+from FunctionEncoder.Model.WRRLSFunctionEncoder import WRRLSFunctionEncoder
 
 from FunctionEncoder.Dataset.BaseDataset import BaseDataset
 from FunctionEncoder.Dataset.QuadraticDataset import QuadraticDataset

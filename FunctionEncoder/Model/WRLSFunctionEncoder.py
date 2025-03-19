@@ -2,7 +2,8 @@ from typing import Union, Tuple
 import torch
 from FunctionEncoder.Model.FunctionEncoder import FunctionEncoder
 
-class RecursiveFunctionEncoder(FunctionEncoder):
+# Implements Weighted Recursive Regularized Least Squares (WRRLS) algorithm
+class WRLSFunctionEncoder(FunctionEncoder):
     def __init__(
         self,
         input_size:tuple[int], 
@@ -18,13 +19,13 @@ class RecursiveFunctionEncoder(FunctionEncoder):
         optimizer=torch.optim.Adam,
         optimizer_kwargs:dict={"lr":1e-3},
         forgetting_factor:float=1, # set < 1 for time-varying parameters (typically between 0.98 and 0.995) and equal to 1 for time-invariant (constant) parameters -- https://www.mathworks.com/help/ident/ug/algorithms-for-online-estimation.html
-        delta:float=1e3, # regularization parameter for the covariance matrix
+        delta:float=1e-3, # regularization parameter for the covariance matrix. Typically set to a small value (e.g., 1e-3) to ensure numerical stability. This is the initial value of the covariance matrix P. Smaller noise variance suggests using a larger value for delta (implying lower initially uncertainty), whereas larger noise variance suggests using a smaller value for delta (implying higher initial uncertainty).
         init_coefficients:torch.Tensor=None, # initial coefficients
     ):
         
         self.forgetting_factor = forgetting_factor
         self.delta = delta
-        self.P = torch.eye(n_basis, device='cuda') * self.delta
+        self.P = torch.eye(n_basis, device='cuda') * (1 / self.delta)
         self.coefficients = init_coefficients
 
         super().__init__(

@@ -346,8 +346,8 @@ class FunctionEncoder(torch.nn.Module):
         """ Computes the inner product between fs and gs. This passes the data to either the deterministic or stochastic inner product methods.
 
         Args:
-        fs: torch.tensor: The first set of function outputs. Shape (n_functions, n_datapoints, input_size, n_basis1)
-        gs: torch.tensor: The second set of function outputs. Shape (n_functions, n_datapoints, input_size, n_basis2)
+        fs: torch.tensor: The first set of function outputs. Shape (n_functions, n_datapoints, output_size, n_basis1)
+        gs: torch.tensor: The second set of function outputs. Shape (n_functions, n_datapoints, output_size, n_basis2)
 
         Returns:
         torch.tensor: The inner product between fs and gs. Shape (n_functions, n_basis1, n_basis2)

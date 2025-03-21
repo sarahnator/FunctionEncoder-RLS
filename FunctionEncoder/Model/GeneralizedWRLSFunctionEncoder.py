@@ -2,7 +2,8 @@ from typing import Union, Tuple
 import torch
 from FunctionEncoder.Model.FunctionEncoder import FunctionEncoder
 
-class WRLSFunctionEncoder(FunctionEncoder):
+# Implements Weighted Recursive Regularized Least Squares (WRRLS) algorithm
+class GeneralizedWRLSFunctionEncoder(FunctionEncoder):
     def __init__(
         self,
         input_size:tuple[int], 
@@ -75,26 +76,33 @@ class WRLSFunctionEncoder(FunctionEncoder):
         P_prev = P if P is not None else self.P
 
         # 1. Compute the regressor (basis function representation of the input)
-        psi = self.model.forward(x).T # shape: (n_basis,)
+        psi = self.model.forward(x).T # shape: (n_basis, n_output)
 
         # 2. Compute the prediction error (innovation)
         y_hat = psi.T @ theta_prev
+        y = y.view(-1, 1)
+        assert y_hat.shape == y.shape, f"y_hat.shape: {y_hat.shape}, y.shape: {y.shape}"
         e = y - y_hat
 
-        # 3. Compute the Kalman gain
-        K = P_prev @ psi / (self.forgetting_factor + psi.T @ P_prev @ psi)
+        # 3. Compute the Kalman gain 
+        gram = self._inner_product(psi.T.unsqueeze(0).unsqueeze(0), psi.T.unsqueeze(0).unsqueeze(0)).squeeze(0)
+        assert gram.shape == (self.n_basis, self.n_basis,), f"gram.shape: {gram.shape}"
+        K = (P_prev @ psi) / (self.forgetting_factor + (gram * P_prev).sum())
 
         # 4. Update the parameter estimate (coefficients)
-        theta_new = theta_prev + K * e
+        theta_new = theta_prev + K @ e
 
         # 5. Update the regularization parameter (covariance matrix)
-        P_new = (1 / self.forgetting_factor) * (P_prev - K @ psi.T @ P_prev)
+        numerator = P_prev @ gram @ P_prev  
+        denominator = (self.forgetting_factor + (gram * P_prev).sum())
+        P_new = (1 / self.forgetting_factor) * (P_prev - (numerator / denominator))
 
         # 6. Update internal state and return the updated coefficients and covariance matrix
         self.P = P_new
         coefficients = theta_new
 
         self.coefficients = coefficients
+        assert self.coefficients.shape == (self.n_basis, 1), f"self.coefficients.shape: {self.coefficients.shape}"
 
         info = {'theta_prev': theta_prev, 'P_prev': P_prev, 'psi': psi, 'y_hat': y_hat, 'e': e, 'K': K, 'P_new': P_new}
 

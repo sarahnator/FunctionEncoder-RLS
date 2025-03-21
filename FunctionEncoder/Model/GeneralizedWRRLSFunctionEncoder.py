@@ -2,7 +2,8 @@ from typing import Union, Tuple
 import torch
 from FunctionEncoder.Model.FunctionEncoder import FunctionEncoder
 
-class WRLSFunctionEncoder(FunctionEncoder):
+# Implements Weighted Recursive Regularized Least Squares (WRRLS) algorithm
+class GeneralizedWRRLSFunctionEncoder(FunctionEncoder):
     def __init__(
         self,
         input_size:tuple[int], 
@@ -18,13 +19,13 @@ class WRLSFunctionEncoder(FunctionEncoder):
         optimizer=torch.optim.Adam,
         optimizer_kwargs:dict={"lr":1e-3},
         forgetting_factor:float=1, # set < 1 for time-varying parameters (typically between 0.98 and 0.995) and equal to 1 for time-invariant (constant) parameters -- https://www.mathworks.com/help/ident/ug/algorithms-for-online-estimation.html
-        delta:float=1e-3, # regularization parameter for the covariance matrix. Typically set to a small value (e.g., 1e-3) to ensure numerical stability. This is the initial value of the covariance matrix P. Smaller noise variance suggests using a larger value for delta (implying lower initially uncertainty), whereas larger noise variance suggests using a smaller value for delta (implying higher initial uncertainty).
         init_coefficients:torch.Tensor=None, # initial coefficients
+        alpha:float=1e-3, # regularization parameter for the covariance matrix. Typically set to a small value (e.g., 1e-3) to ensure numerical stability. 
     ):
         
         self.forgetting_factor = forgetting_factor
-        self.delta = delta
-        self.P = torch.eye(n_basis, device='cuda') * (1 / self.delta)
+        self.alpha = alpha
+        self.Q_tilde = torch.zeros(n_basis, device='cuda') # this is the data-dependent part of the Gram matrix
         self.coefficients = init_coefficients
 
         super().__init__(
@@ -43,60 +44,76 @@ class WRLSFunctionEncoder(FunctionEncoder):
     )
         
    
-    def recursive_update(self, x, y, coefficients=None, P=None):
+    def recursive_update(self, x, y, coefficients=None, Q_tilde=None):
         """
-        Perform a recursive least squares (RLS) update of the basis function coefficients.
-        Update equations are based on the forgetting factor adaptation algorithm: https://www.mathworks.com/help/ident/ug/algorithms-for-online-estimation.html
+        Perform a recursive least squares (RLS) update of the basis function coefficients with a regularization term.
+        Update equations modified the forgetting factor adaptation algorithm (https://www.mathworks.com/help/ident/ug/algorithms-for-online-estimation.html)
+        to include a regularization term.
         
         Notation is as follows:
         - x: input data
         - y: target data
         - coefficients: current coefficients
-        - P: covariance matrix (optional)
+        - Q_tilde: data-dependent portion of the Gram (optional)
+        - alpha: regularization parameter
         - theta_prev: previous coefficients
-        - P_prev: previous covariance matrix
+        - Q_tilde_prev: previous data-dependent portion of the Gram
         - psi: regressor (basis function representation of the input)
         - y_hat: predicted output
         - e: prediction error (innovation)
         - K: Kalman gain
         - theta_new: updated coefficients
-        - P_new: updated covariance matrix
+        - Q_tilde_new: updated data-dependent portion of the Gram
+        - R: regularized Gram matrix
+        - P: covariance matrix (inverse of R)
 
         Args:
             x: input data
             y: target data
             coefficients: current coefficients
-            P: covariance matrix (optional)
+            Q_tilde: covariance matrix (optional)
         Returns:
             coefficients: updated coefficients
             info: additional information (optional)
         """
         theta_prev = coefficients if coefficients is not None else self.coefficients
-        P_prev = P if P is not None else self.P
+        Q_tilde_prev = Q_tilde if Q_tilde is not None else self.Q_tilde
 
         # 1. Compute the regressor (basis function representation of the input)
-        psi = self.model.forward(x).T # shape: (n_basis,)
+        psi = self.model.forward(x).T # shape: (n_basis, n_output)
 
         # 2. Compute the prediction error (innovation)
         y_hat = psi.T @ theta_prev
+        e = y - y_hat        
+        y = y.view(-1, 1)
+        assert y_hat.shape == y.shape, f"y_hat.shape: {y_hat.shape}, y.shape: {y.shape}"
         e = y - y_hat
 
         # 3. Compute the Kalman gain
-        K = P_prev @ psi / (self.forgetting_factor + psi.T @ P_prev @ psi)
+        # 3a. Reconstruct and invert the regularized Gram matrix R
+        alpha_I = self.alpha * torch.eye(self.n_basis, device='cuda')
+        Q = Q_tilde_prev + alpha_I
+        R = self.forgetting_factor * Q + (1 - self.forgetting_factor) * alpha_I
+        P = torch.inverse(R)
+        # 3b. Compute the Kalman gain
+        gram = self._inner_product(psi.T.unsqueeze(0).unsqueeze(0), psi.T.unsqueeze(0).unsqueeze(0)).squeeze(0)
+        assert gram.shape == (self.n_basis, self.n_basis,), f"gram.shape: {gram.shape}"
+        K = (P @ psi) / (self.forgetting_factor + (gram * P).sum())
 
         # 4. Update the parameter estimate (coefficients)
-        theta_new = theta_prev + K * e
+        theta_new = theta_prev + K @ e
 
-        # 5. Update the regularization parameter (covariance matrix)
-        P_new = (1 / self.forgetting_factor) * (P_prev - K @ psi.T @ P_prev)
+        # 5. Update data-dependent portion of the Gram matrix
+        Q_tilde_new = self.forgetting_factor * Q_tilde_prev + gram
 
         # 6. Update internal state and return the updated coefficients and covariance matrix
-        self.P = P_new
+        self.Q_tilde = Q_tilde_new
         coefficients = theta_new
 
         self.coefficients = coefficients
+        assert self.coefficients.shape == (self.n_basis, 1), f"self.coefficients.shape: {self.coefficients.shape}"
 
-        info = {'theta_prev': theta_prev, 'P_prev': P_prev, 'psi': psi, 'y_hat': y_hat, 'e': e, 'K': K, 'P_new': P_new}
+        info = {'theta_prev': theta_prev, 'Q_tilde_prev': Q_tilde_prev, 'psi': psi, 'y_hat': y_hat, 'e': e, 'K': K, 'Q_tilde_new': Q_tilde_new}
 
         return coefficients, info
     

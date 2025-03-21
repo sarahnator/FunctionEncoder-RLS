@@ -9,8 +9,8 @@ import torch
 import numpy as np
 import matplotlib.animation as animation
 
-from FunctionEncoder import QuadraticDataset, WRLSFunctionEncoder, MSECallback, ListCallback, TensorboardCallback, DistanceCallback
-
+from FunctionEncoder import QuadraticDataset, MSECallback, ListCallback, TensorboardCallback, DistanceCallback
+from FunctionEncoder import GeneralizedWRLSFunctionEncoder as WRLSFunctionEncoder
 import argparse
 
 
@@ -32,7 +32,8 @@ n_basis = args.n_basis
 device = "cuda" if torch.cuda.is_available() else "cpu"
 train_method = args.train_method
 seed = args.seed
-load_path = args.load_path
+# load_path = args.load_path
+load_path = 'logs/rls_example/least_squares/shared_model/2025-03-20_16-29-30'
 residuals = args.residuals
 if load_path is None:
     logdir = f"logs/rls_example/{train_method}/{'shared_model' if not args.parallel else 'parallel_models'}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
@@ -99,7 +100,7 @@ else:
 # RLS with subsampled iterates for efficiency
 with torch.no_grad():
     example_xs, example_ys, query_xs, query_ys, sample_info = dataset.sample()
-    function_idx = 1  # choose one of the functions
+    function_idx = 3  # choose one of the functions
     # print(f'Function {function_idx} A: {sample_info["As"][function_idx]}, B: {sample_info["Bs"][function_idx]}, C: {sample_info["Cs"][function_idx]}')
     n = 100
     example_xs = example_xs[function_idx, :n]

@@ -15,72 +15,34 @@ Several variants of Recursive Least Squares:
 import torch
 from abc import ABC, abstractmethod
 from FunctionEncoder.Model.FunctionEncoder import FunctionEncoder
-import torch
 
 class PolynomialModel():
-    def __init__(self, input_size: int, output_size: int, degree: int = 2):
-        """
-        degree: highest power of x to include (so number of regressors = degree+1)
-        """
+
+    def __init__(self, input_size, output_size, degree=2):
+        assert input_size[0] == 1, "only scalar inputs supported"
         self.degree = degree
-        self.input_size = input_size
-        self.output_size = output_size
-        # Ensure input_size is 1 for polynomial regression
-        if input_size[0] != 1:
-            raise ValueError("PolynomialModel only supports input_size=1 for univariate polynomial regression.")
-        # Ensure output_size is 1 for univariate polynomial regression
-        if output_size[0] != 1:
-            raise ValueError("PolynomialModel only supports output_size=1 for univariate polynomial regression.")
+        self.output_size = output_size  # e.g. (m,)
 
-    def forward_basis_functions(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Build the design matrix Phi for unbatched inputs.
-        
-        Args:
-            x: Tensor of shape (n_points,) or (n_points,1)
-        
-        Returns:
-            Phi: Tensor of shape (n_points, degree+1),
-                 where column j is x**j.
-        """
-        # Flatten to (n_points,)
-        x = x.view(-1)
-        # Stack [1, x, x^2, ..., x^degree]
-        powers = [x**d for d in range(self.degree+1)]
-        Phi = torch.stack(powers, dim=-1)  # → (n_points, degree+1)
-        return Phi.cuda() if x.is_cuda else Phi  # Move to GPU if needed
+    def forward_basis_functions(self, x):
+        # x: (batch, n_pts, 1)
+        if x.dim() != 3 or x.shape[-1] != 1:
+           x = x.unsqueeze(-1)  # Ensure x is (batch, n_pts, 1)
+        powers = torch.stack([x[...,0]**d for d in range(self.degree+1)], dim=-1)
+        return powers
 
-    def predict(self, x: torch.Tensor, representations: torch.Tensor) -> torch.Tensor:
-        """
-        Compute y_hat = Phi(x) @ theta.
-        
-        Args:
-            x:           Tensor of shape (n_points,) or (n_points,1)
-            representations: Tensor of shape (degree+1)
+    def predict(self, x, representations):
+        # x: (batch, n_pts, 1)
+        # theta: (batch, degree+1)
+        Phi = self.forward_basis_functions(x)         # (b, n_pts, r)
+        return torch.einsum('bpr,br->bp', Phi, representations) # (b, n_pts)
 
-        Returns:
-            y_hat: Tensor of shape (output_dim,)
-        """
-        Phi = self.forward_basis_functions(x)       # (n_points, r)
-        y_hat = Phi @ representations                  # (n_points,)
-        return y_hat
-
-    def compute_representation(self, x: torch.Tensor, y: torch.Tensor):
-        """
-        Solve the ordinary least-squares coefficients.
-        
-        Args:
-            x: Tensor of shape (n_points,) or (n_points,1)
-            y: Tensor of shape (n_points,)
-
-        Returns:
-            theta:   Tensor of shape (degree+1,)
-            sol:     the full LSTSQ result (with .solution, .residuals, etc.)
-        """
-        Phi = self.forward_basis_functions(x)       # (n_points, r)
-        sol = torch.linalg.lstsq(Phi, y.view(-1))   # solves Phi @ theta = y
+    def compute_representation(self, x, y):
+        # x: (1, n_pts, 1), y: (1, n_pts, m)
+        X = x.squeeze(0)[...,0]                       # (n_pts,)
+        Phi = torch.stack([X**d for d in range(self.degree+1)], dim=-1)  # (n_pts, r)
+        # solve Phi @ coef = y.squeeze(0) in least-squares sense
+        sol = torch.linalg.lstsq(Phi, y.squeeze(0))    # A=Phi, B=y
         return sol.solution, sol
-
     
 class BaseRLS(ABC):
     """
@@ -92,6 +54,13 @@ class BaseRLS(ABC):
         self.theta = theta0 if theta0 is not None else torch.zeros((n_regressors))
 
         self.P = P0 if P0 is not None else torch.eye(n_regressors) * 1e2
+
+        # Add a dimension to P to match the batch size of theta
+        if self.theta.dim() == 1:
+            self.theta = self.theta.unsqueeze(0)
+        if self.theta.dim() == 2 and self.P.dim() == 2:
+            self.P = torch.stack([self.P] * self.theta.shape[0], dim=0)  # Expand P to match batch size of theta
+
         # move to device if model is on GPU
         # if next(self.model.parameters()).is_cuda:
         self.theta = self.theta.cuda()
@@ -100,39 +69,39 @@ class BaseRLS(ABC):
     def debug_info(self):
         """Prints debug information"""
         # Is P positive definite?
-        print(self.P)
-        if not torch.all(torch.linalg.eigvals(self.P).real > 0):
+        print(self.P[0,...])
+        if not torch.all(torch.linalg.eigvals(self.P[0,...]).real > 0):
             print("Covariance matrix P is not positive definite.")
             # raise ValueError("Covariance matrix P is not positive definite.")
         # Check that P is symmetric
-        if not torch.allclose(self.P, self.P.T, atol=1e-6):
+        if not torch.allclose(self.P[0,...], self.P[0,...].T, atol=1e-6):
             print("Covariance matrix P is not symmetric.")
             # raise ValueError("Covariance matrix P is not symmetric.")
         # Check that P is well-conditioned
-        if torch.linalg.cond(self.P) > 1e10:  # arbitrary threshold for conditioning
+        if torch.linalg.cond(self.P[0,...]) > 1e10:  # arbitrary threshold for conditioning
             print("Covariance matrix P is poorly conditioned.")
             # raise ValueError("Covariance matrix P is poorly conditioned.")
         # Check that P is not singular
-        if torch.linalg.det(self.P) < 1e-10:  # arbitrary threshold for singularity
+        if torch.linalg.det(self.P[0,...]) < 1e-10:  # arbitrary threshold for singularity
             print("Covariance matrix P is singular or nearly singular.")
             # raise ValueError("Covariance matrix P is singular or nearly singular.")
         # Check that P is not too large
-        if torch.max(self.P) > 1e10:  # arbitrary threshold for large values
+        if torch.max(self.P[0,...]) > 1e10:  # arbitrary threshold for large values
             print("Covariance matrix P has excessively large values.")
             # raise ValueError("Covariance matrix P has excessively large values.")
         # Check that P is not too small
-        if torch.min(self.P) < 1e-10:  # arbitrary threshold for small values
+        if torch.min(self.P[0,...]) < 1e-10:  # arbitrary threshold for small values
             print("Covariance matrix P has excessively small values.")
             # raise ValueError("Covariance matrix P has excessively small values.")
 
     @abstractmethod
     def update(self, x: torch.tensor, y: torch.tensor, debug_mode=True):
         """
-        x: input vector (input_dim,) 
-        y: vector measurement (output_dim,) 
+        x: input vector (batch_dim, input_dim,) 
+        y: vector measurement (batch_dim, output_dim,) 
         debug_mode: if True, prints debug information
         Returns:
-        theta: updated coefficients (n_regressors,)
+        theta: updated coefficients (batch_dim, n_regressors)
         info: dictionary with debug information
         """
         pass
@@ -141,8 +110,8 @@ class StandardRLS(BaseRLS):
     """Plain RLS with optional regularization via initial P."""
 
     def update(self, x, y, debug_mode=True):
-        assert len(x.shape) in [1], f"Expected x to have shape (d,), got {x.shape}"
-        assert len(y.shape) in [1], f"Expected y to have shape (m,), got {y.shape}"
+        assert len(x.shape) in [1,2], f"Expected x to have shape (b,d) or (d,), got {x.shape}"
+        assert len(y.shape) in [1,2], f"Expected y to have shape (b,m) or (m,), got {y.shape}"
 
         theta_prev = self.theta.clone()  # Store previous coefficients
         P_prev = self.P.clone() 
@@ -150,71 +119,69 @@ class StandardRLS(BaseRLS):
         # Get the regressor (basis function representation of the input)
         Phi = self.model.forward_basis_functions(x) 
         
-        # Ensure Phi is (n_outputs, n_regressors)
-        if Phi.dim() != 2 or Phi.shape[0] != self.model.output_size[0] or Phi.shape[1] != self.n:
+        # Ensure Phi is (batch_size, n_outputs, n_regressors)
+        if Phi.dim() != 3 or Phi.shape[1] != self.model.output_size[0] or Phi.shape[-1] != self.n:
             raise ValueError(f"Invalid regressor shape: {Phi.shape}")
 
         #  Compute the prediction
-        query_xs = x.unsqueeze(0) if x.dim() == 1 else x.unsqueeze(1) # Ensure query_xs is (n_datapoints, input_dim)
-        representations = theta_prev  # Ensure representations is (n_regressors)
-
-        if type(self.model) == FunctionEncoder:  
-            # Ensure query_xs is (batch_size, n_datapoints, input_dim)
-            # Ensure representations is (batch_size, n_regressors)
-            query_xs = query_xs.unsqueeze(0)  # Add batch dimension
-            representations = representations.unsqueeze(0)
-            y_hat = self.model.predict(query_xs, representations=representations) # predicted shape (batch_size, n_datapoints, output_dim)
-            y_hat = y_hat.squeeze(0).squeeze(0)  # Remove batch and n_datapoints dimensions
-        else:
-            # For PolynomialModel, we can directly use the predict method
-            y_hat = self.model.predict(query_xs, representations)
+        query_xs = x.unsqueeze(0) if x.dim() == 1 else x.unsqueeze(1) # Ensure query_xs is (batch_size, n_datapoints, input_dim)
+        representations = theta_prev  # Ensure representations is (batch_dim, n_regressors)
+        y_hat = self.model.predict(query_xs, representations=representations) # predicted shape (batch_size, n_datapoints, output_dim)
         
-        #  Ensure y_hat is (output_dim,)
-        if y_hat.dim() != 1 or y_hat.shape[0] != self.model.output_size[0]:
-            raise ValueError(f"Invalid prediction shape: {y_hat.shape}")
+        # Ensure y_hat is (batch_size, output_dim)
+        y_hat = y_hat.squeeze(1) # Remove n_points dimension
 
-        # #  Compute the prediction
-        # y_hat2 = Phi @ self.theta
-        # # check y_hat2 and y_hat are the same?
-        # if not torch.allclose(y_hat, y_hat2, atol=1e-6):
-        #     raise ValueError(f"Prediction mismatch: {y_hat.shape} vs {y_hat2.shape}")
+        #  Compute the prediction
+        y_hat2 = torch.einsum('bmn,bn->bm', Phi, self.theta)
+        # check y_hat2 and y_hat are the same?
+        if not torch.allclose(y_hat, y_hat2, atol=1e-6):
+            raise ValueError(f"Prediction mismatch: {y_hat.shape} vs {y_hat2.shape}")
         
         # Compute the prediction error (innovation)
-        e = y - y_hat # (output_dim)
+        e = y - y_hat # (batch_size, output_dim)
         if e.shape[-1] != self.model.output_size[0]:
             raise ValueError(f"Invalid prediction error shape: {e.shape}")
 
         # Compute the innovation covariance
         # S = Phi @ self.P @ Phi.T + torch.eye(self.model.output_size) * 1e-6  # small regularization to avoid singularity
-        S = Phi @ self.P @ Phi.T + torch.eye(self.model.output_size[0]).cuda()
+        # S = Phi @ self.P @ Phi.T + torch.eye(self.model.output_size[0])
+        S = torch.einsum('bmn,bnn->bmn', Phi, self.P)
+        S = torch.einsum('bmn,bni->bmi', S, Phi.transpose(-1, -2))  # S is now (batch_size, output_dim, output_dim)
+        S = S + torch.stack([torch.eye(self.model.output_size[0], device=S.device)] * S.shape[0], dim=0) 
+        # Check that S has dimensions (batch_size, output_dim, output_dim)
+        if S.dim() != 3 or S.shape[0] != self.theta.shape[0] or S.shape[1] != self.model.output_size[0] or S.shape[2] != self.model.output_size[0]:
+            raise ValueError(f"Invalid innovation covariance shape: {S.shape}")
         
-        # Ensure S is (output_dim, output_dim)
-        if S.dim() != 2 or S.shape[0] != self.model.output_size[0] or S.shape[1] != self.model.output_size[0]:
-            raise ValueError(f"Invalid innovation covariance shape: {S.shape}")    
         try:
             S = torch.linalg.inv(S)  # Invert S to compute Kalman gain
         except RuntimeError:
             raise ValueError("Innovation covariance S is not invertible.")
 
         # Compute the Kalman gain
-        K = self.P @ Phi.T @ S
-        # Check that K has dimensions (n_regressors, output_dim)
-        if K.dim() != 2 or K.shape[0] != self.n or K.shape[1] != self.model.output_size[0]:
-            raise ValueError(f"Invalid Kalman gain shape: {K.shape}")
+        # K = self.P @ Phi.T @ S
+        # K = torch.einsum('bnn,bnm->bnm', self.P, Phi.transpose(-1, -2))  # K is now (batch_size, n_regressors, output_dim)
+        # K = torch.einsum('bnm,bmi->bni', K, S)  # K is now (batch_size, n_regressors, output_dim)
+        # # Check that K has dimensions (batch_size, n_regressors, output_dim)
+        # if K.dim() != 3 or K.shape[1] != self.n or K.shape[-1] != self.model.output_size[0]:
+        #     raise ValueError(f"Invalid Kalman gain shape: {K.shape}")
 
-        # K = P_prev[0,...] @ Phi[0,...].T / (1 + Phi[0,...] @ P_prev[0,...] @ Phi[0,...].T).unsqueeze(0)
+        K = P_prev[0,...] @ Phi[0,...].T / (1 + Phi[0,...] @ P_prev[0,...] @ Phi[0,...].T).unsqueeze(0)
 
         # Update the parameter estimate (coefficients)
-        self.theta = self.theta + K @ e
-        # Check that theta has dimensions (n_regressors)
-        if self.theta.dim() != 1 or self.theta.shape[0] != self.n:
+        # self.theta = self.theta + K @ e
+        self.theta = torch.einsum('bnm,bm->bn', K, e)  # self.theta is now (batch_size, n_regressors)
+        # Check that theta has dimensions (batch_size, n_regressors)
+        if self.theta.dim() != 2 or self.theta.shape[0] != theta_prev.shape[0] or self.theta.shape[-1] != self.n:
             raise ValueError(f"Invalid coefficients shape: {self.theta.shape}")
 
         # Update the covariance matrix
-        self.P = self.P - K @ Phi @ self.P
+        # self.P = self.P - K @ Phi @ self.P
+        rank_k_update = torch.einsum('bmn,bni->bmi', Phi, self.P)  # rank-k update
+        normalized_rank_k_update = torch.einsum('bnm,bmi->bni', K, rank_k_update)  # K @ Phi.T
+        self.P = self.P - normalized_rank_k_update
 
-        # Check that P has dimensions (n_regressors, n_regressors)
-        if self.P.dim() != 2 or self.P.shape[0] != self.n or self.P.shape[1] != self.n:
+        # Check that P has dimensions (batch_size, n_regressors, n_regressors)
+        if self.P.dim() != 3 or self.P.shape[0] != self.theta.shape[0] or self.P.shape[1] != self.n or self.P.shape[2] != self.n:
             raise ValueError(f"Invalid covariance matrix shape: {self.P.shape}")
         
         if debug_mode:

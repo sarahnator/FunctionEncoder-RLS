@@ -96,7 +96,6 @@ with torch.no_grad():
     initial_states = torch.rand(batch_size, 2, device=device) * (dataset.input_max - dataset.input_min) + dataset.input_min
     all_states, all_estimated_states = [initial_states], [initial_states]
 
-
     # integrate to find outputs of both ground truth and estimate
     for i in trange(1000, desc="Integrating trajectory"):
         # do real first
@@ -129,37 +128,68 @@ with torch.no_grad():
     plt.close()
 
 
-    # parameter_iterates = [rls.theta.clone() for _ in range(example_xs.shape[1])]
     # Load RLS model
-    theta0 = torch.zeros((batch_size, n_basis), device=device)  # initial coefficients
-    rls = make_rls(method='standard', n_regressors=n_basis, fe_model=model, theta0=theta0)
+    n_systems = 1
+    for j in range(n_systems):
+        theta0 = torch.zeros((n_basis), device=device)  # initial coefficients
+        rls = make_rls(method='standard', n_regressors=n_basis, model=model, theta0=theta0)
 
-    parameter_iterates = [rls.theta.clone()]
-    for i in range(example_xs.shape[1]):
-        x = example_xs[:batch_size, i, :].to(device)
-        y = example_ys[:batch_size, i, :].to(device)
-        # update RLS
-        theta, info = rls.update(x, y)
-        parameter_iterates.append(theta.clone())
-    parameter_iterates = torch.stack(parameter_iterates, dim=0) # shape (t, batch_size, n_basis)
-    parameter_iterate_norms = torch.norm(parameter_iterates, dim=-1)
+        true_parameters = coeffs[j].clone().to(device)  # true parameters for the j-th system
+        parameter_iterates = [rls.theta.clone()]
+        n_iterates = example_xs.shape[1]  # number of iterations to run RLS
+        for i in range(n_iterates):
+            x = example_xs[j, i, :].to(device)
+            y = example_ys[j, i, :].to(device)
+            # update RLS
+            theta, rls_info = rls.update(x, y)
+            parameter_iterates.append(theta.clone())
+        parameter_iterates = torch.stack(parameter_iterates, dim=0) # shape (t, n_basis)
+        parameter_iterate_norms = torch.norm(parameter_iterates, dim=-1)
 
-    plt.plot(parameter_iterate_norms.cpu())
-    plt.yscale("log")
-    plt.title("Parameter norms over iterations")
-    plt.xlabel("Iteration")
-    plt.ylabel("Parameter norm")
-    plt.show()
-    plt.close()
-    
-    # compute residuals
-    residuals = parameter_iterates - coeffs
-    residual_norms = residuals.norm(dim=-1)
-    plt.plot(residual_norms.cpu())
-    plt.yscale("log")
-    plt.title("Parameter Residual norms over iterations")
-    plt.xlabel("Iteration")
-    plt.ylabel("Residual norm")
-    plt.show()
-    plt.close()
+        plt.plot(parameter_iterate_norms.cpu())
+        plt.yscale("log")
+        plt.title("Parameter norms over iterations")
+        plt.xlabel("Iteration")
+        plt.ylabel("Parameter norm")
+        plt.show()
+        plt.close()
+        
+        # compute residuals
+        residuals = parameter_iterates - true_parameters
+        residual_norms = residuals.norm(dim=-1)
+        plt.plot(residual_norms.cpu())
+        plt.yscale("log")
+        plt.title("Parameter Residual norms over iterations")
+        plt.xlabel("Iteration")
+        plt.ylabel("Residual norm")
+        plt.show()
+        plt.close()
+
+        print(f"Final parameters for system {j}: {parameter_iterates[-1].cpu().numpy()}")
+        print(f"True parameters for system {j}: {true_parameters.cpu().numpy()}")
+        print(f"Final residuals for system {j}: {residuals[-1].cpu().numpy()}")
+        print(f"Final residual norm for system {j}: {residual_norms[-1].cpu().item()}")
+
+
+        # integrate to find outputs of rls estimate
+        rls_state_estimates = [initial_states[j].clone().unsqueeze(0)]  # start with the initial state
+        for i in trange(1000, desc="Integrating trajectory"):
+            # do the same for the RLS model
+            current_rls_state = rls_state_estimates[-1] 
+            change_in_rls_state = model.predict(current_rls_state.unsqueeze(1), parameter_iterates[-1].unsqueeze(0)).squeeze(1)
+            new_rls_state = current_rls_state + change_in_rls_state
+            rls_state_estimates.append(new_rls_state)
+
+        all_rls_states = torch.stack(rls_state_estimates, dim=0)
+        # plot the system
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.plot(all_states[j, :, 0].cpu(), all_states[j, :, 1].cpu(), label="True")
+        ax.plot(all_estimated_states[j, :, 0].cpu(), all_estimated_states[j, :, 1].cpu(), label="Estimate")
+        ax.set_title(f"mu={info['mus'].flatten()[j].item():0.1f}")
+
+        ax.plot(all_rls_states[:,:, 0].cpu(), all_rls_states[:,:, 1].cpu(), label="RLS Estimate")
+        ax.legend()
+        plt.tight_layout()
+        plt.savefig(f"{logdir}/plot_vdp_{j}.png")
+
 

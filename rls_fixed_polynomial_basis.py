@@ -12,6 +12,10 @@ import argparse
 
 from RLS.rls import *
 
+"""
+Tests the RLS algorithm on a polynomial model with a fixed polynomial basis.
+"""
+
 # seed torch
 torch.manual_seed(0)
 
@@ -94,4 +98,11 @@ def update(frame):
 
 ani = animation.FuncAnimation(fig, update, frames=len(subsampled_iterates),
                                 interval=100, blit=True, repeat_delay=500)
-ani.save(f"./rls_func_{function_idx}.mp4", writer="ffmpeg")
+
+# make the log directory
+logdir = "./logs/fixed_polynomial_basis"
+import os
+if not os.path.exists(logdir):
+    os.makedirs(logdir)
+# Save the animation
+ani.save(f"{logdir}/rls_func_{function_idx}.mp4", writer="ffmpeg")

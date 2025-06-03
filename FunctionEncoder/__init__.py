@@ -1,9 +1,5 @@
 
 from FunctionEncoder.Model.FunctionEncoder import FunctionEncoder
-from FunctionEncoder.Model.WRLSFunctionEncoder import WRLSFunctionEncoder
-from FunctionEncoder.Model.WRRLSFunctionEncoder import WRRLSFunctionEncoder
-from FunctionEncoder.Model.GeneralizedWRLSFunctionEncoder import GeneralizedWRLSFunctionEncoder
-from FunctionEncoder.Model.GeneralizedWRRLSFunctionEncoder import GeneralizedWRRLSFunctionEncoder
 
 from FunctionEncoder.Dataset.BaseDataset import BaseDataset
 from FunctionEncoder.Dataset.QuadraticDataset import QuadraticDataset
@@ -23,10 +19,6 @@ from FunctionEncoder.Callbacks.DistanceCallback import DistanceCallback
 
 __all__ = [
     "FunctionEncoder",
-    "WRLSFunctionEncoder",
-    "WRRLSFunctionEncoder",
-    "GeneralizedWRLSFunctionEncoder"
-    "GeneralizedWRRLSFunctionEncoder"
 
     "BaseDataset",
     "QuadraticDataset",

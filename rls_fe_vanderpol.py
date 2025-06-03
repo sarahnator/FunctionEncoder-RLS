@@ -123,7 +123,8 @@ with torch.no_grad():
             x = xs[i, :].to(device)
             y = ys[i, :].to(device) # + torch.randn_like(ys[i, :], device=device) * 0.11
             # update RLS
-            theta, rls_info = rls.update(x, y)
+            # theta, rls_info = rls.update(x, y)
+            theta, rls_info = rls.square_root_update(x, y)
             parameter_iterates.append(theta.clone())
             all_rls_info.append(rls_info)
 

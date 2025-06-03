@@ -99,6 +99,80 @@ class BaseRLS(ABC):
         # if next(self.model.parameters()).is_cuda:
         self.theta = self.theta.cuda()
         self.P = self.P.cuda()
+
+    def update_matrix_factorization(self, P_prev, Phi):
+        """
+        Square‐root RLS update (Morf & Kailath, Ljung §11.7):
+        Given the previous covariance P_prev (d×d) and the new regressor Phi (m×d),
+        produce the updated P_new in an O((p+d)^3) QR step without ever inverting P.
+        """
+        # number of outputs (p) and number of regressors (d)
+        p = self.model.output_size[0]
+        d = self.n
+        device = P_prev.device
+        dtype  = P_prev.dtype
+
+        # 1. Cholesky on P_prev to get lower‐triangular Q_prev  (d×d)
+        Q_prev = torch.linalg.cholesky(P_prev)   # P_prev = Q_prev @ Q_prev.T
+
+        # 2. Build p(t) = Cholesky of [k·R] or of R if no forgetting factor
+        if hasattr(self, 'R'):
+            S    = self.R.clone().to(device=device, dtype=dtype)
+            lamb = 1.0
+        else:
+            k    = getattr(self, 'forgeting_factor', 1.0)
+            S    = k * torch.eye(p, device=device, dtype=dtype)
+            lamb = k
+        mu_t = torch.linalg.cholesky(S)  # lower‐triangular square‐root of k·R (or R itself)
+
+        # 3. Form the (p+d)×(p+d) block matrix:
+        #      L = [   mu_t       |   0_p×d ;
+        #            Q_prev.T @ Phi.T  |  Q_prev.T ]
+        zero_top = torch.zeros((p, d), device=device, dtype=dtype)
+        top      = torch.cat((mu_t, zero_top), dim=1)          # shape (p×(p+d))
+
+        bottom   = torch.cat((Q_prev.T @ Phi.T, Q_prev.T), dim=1)  # shape (d×(p+d))
+        L_full   = torch.cat((top, bottom), dim=0)                  # shape ((p+d)×(p+d))
+
+        # 4. Single QR → L_full = Q_full @ R_full, R_full upper triangular
+        #    We only need R_full, so do a “reduced” QR:
+        # From pyTorch docs: The reduced QR decomposition agrees with the full QR decomposition when n >= m (wide matrix).
+        Q_full, R_full = torch.linalg.qr(L_full, mode='reduced')
+        # Now R_full is (p+d)×(p+d) upper triangular.
+        # R_full is the block matrix:
+        #      R_full = [ Pi.T | L_tilde.T ;
+        #                 0_d×p | Q_bar.T ]
+
+        # 5. The new Cholesky factor Q_new is the lower‐right d×d block of R_full
+        R_block = R_full[p:, p:]  # pick out the bottom‐right d×d submatrix
+
+        # 6. Reconstruct P_new = (R_block)^T @ (R_block), then divide by lamb if needed
+        P_new = R_block.T @ R_block
+        if (lamb != 0.0) and (lamb != 1.0):
+            P_new = P_new / lamb
+
+        # We can compute the gain K and the innovation covariance S if needed
+        Pi_T = R_full[:p, :p]  # upper-left p×p block
+        L_tilde_T = R_full[:p, p:] # upper-right p×d block 
+        # K = (L_tilde_T.mT @ torch.linalg.inv(Pi))       # least‐reliable (forms an explicit inverse)
+        # or equivalently
+        # K = torch.linalg.solve(Pi, L_tilde.T).T     # stable: solves π X = L̃^T, then transpose
+        # Solve π @ X = L_tilde_T without forming π^{-1}, then transpose to get K = L̃ @ π^{-1}, which has shape (d × p)
+        X = torch.linalg.solve_triangular(Pi_T, L_tilde_T, upper=True, left=True)
+        K = X.T  # shape (p, d)
+
+        S = Pi_T.T @ Pi_T
+
+        # check matrix shapes
+        if P_new.dim() != 2 or P_new.shape[0] != self.n or P_new.shape[1] != self.n:
+            raise ValueError(f"Invalid covariance matrix shape: {P_new.shape}")
+        if K.dim() != 2 or K.shape[0] != self.n or K.shape[1] != self.model.output_size[0]:
+            raise ValueError(f"Invalid Kalman gain shape: {K.shape}")
+        if S.dim() != 2 or S.shape[0] != self.model.output_size[0] or S.shape[1] != self.model.output_size[0]:
+            raise ValueError(f"Invalid innovation covariance shape: {S.shape}")
+
+        return P_new, K, S
+
             
     def debug_info(self):
         """
@@ -236,6 +310,14 @@ class BaseRLS(ABC):
         info: dictionary with debug information
         """
         pass
+    @abstractmethod
+    def square_root_update(self,  x: torch.tensor, y: torch.tensor, debug_mode=True):
+        """
+        Square‐root RLS update (Morf & Kailath, Ljung §11.7):
+        Given the previous covariance P_prev (d×d) and the new regressor Phi (m×d),
+        produce the updated P_new in an O((p+d)^3) QR step without ever inverting P.
+        """
+        pass
 
 class StandardRLS(BaseRLS):
     """Plain RLS with optional regularization via initial P."""
@@ -302,6 +384,8 @@ class StandardRLS(BaseRLS):
         # # Force symmetry and positive definiteness
         # self.P = (self.P + self.P.T) / 2  # Ensure symmetry
         
+        # other_P, other_K, other_S = self.update_matrix_factorization(P_prev, Phi)
+
         if debug_mode:
             self.debug_info()
 
@@ -312,10 +396,78 @@ class StandardRLS(BaseRLS):
             'y_hat': y_hat,
             'e': e,
             'K': K,
-            'P_new': self.P
+            'P_new': self.P,
+            'S': S
         }
 
         return self.theta, info
+    
+    def square_root_update(self, x, y, debug_mode=True):
+        """
+        Square‐root RLS update (Morf & Kailath, Ljung §11.7):
+        Given the previous covariance P_prev (d×d) and the new regressor Phi (m×d),
+        produce the updated P_new in an O((p+d)^3) QR step without ever inverting P.
+        """
+        assert len(x.shape) in [1], f"Expected x to have shape (d,), got {x.shape}"
+        assert len(y.shape) in [1], f"Expected y to have shape (m,), got {y.shape}"
+
+        theta_prev = self.theta.clone()
+        P_prev = self.P.clone()
+
+        # 1. Compute the regressor matrix (basis function representation of the input)
+        Phi = self.model.forward_basis_functions(x)  # shape (n_outputs, n_regressors)
+        if Phi.dim() != 2 or Phi.shape[0] != self.model.output_size[0] or Phi.shape[1] != self.n:
+            raise ValueError(f"Invalid regressor shape: {Phi.shape}")   
+        
+        # 2. Compute the prediction y_hat = Phi @ theta_prev with shape (n_outputs,)
+        query_xs = x.unsqueeze(0) if x.dim() == 1 else x.unsqueeze(1)
+        representations = theta_prev  # shape (n_regressors,)
+        if type(self.model) == FunctionEncoder:
+            # FunctionEncoder expects query_xs with shape (batch_size, n_datapoints, input_dim)
+            # and representations with shape (batch_size, n_regressors)
+            query_xs = query_xs.unsqueeze(0)
+            representations = representations.unsqueeze(0)
+            y_hat = self.model.predict(query_xs, representations=representations)  # returns shape (batch_size, n_datapoints, output_dim)
+            y_hat = y_hat.squeeze(0).squeeze(0)  # Remove batch and n_datapoints dimensions
+        else:
+            # For PolynomialModel, we can directly use the predict method
+            y_hat = self.model.predict(query_xs, representations)
+        # Ensure y_hat is (output_dim,)
+        if y_hat.dim() != 1 or y_hat.shape[0] != self.model.output_size[0]:
+            raise ValueError(f"Invalid prediction shape: {y_hat.shape}")
+        # 3. Compute the prediction error (innovation)
+        e = y - y_hat  # shape (output_dim,)
+        if e.shape[-1] != self.model.output_size[0]:
+            raise ValueError(f"Invalid prediction error shape: {e.shape}")
+        
+        # use matrix factorization to update P, compute K and S
+        P_new, K, S = self.update_matrix_factorization(P_prev, Phi)
+
+        # 4. Update the parameter estimate (coefficients)
+        self.theta = self.theta + K @ e  # expect shape (n_regressors,)
+        if self.theta.dim() != 1 or self.theta.shape[0] != self.n:
+            raise ValueError(f"Invalid coefficients shape: {self.theta.shape}") 
+        # Note: P_new is already updated in the update_matrix_factorization method
+        self.P = P_new
+        if self.P.dim() != 2 or self.P.shape[0] != self.n or self.P.shape[1] != self.n:
+            raise ValueError(f"Invalid covariance matrix shape: {self.P.shape}")  
+
+        if debug_mode:
+            self.debug_info()
+
+        info = {
+            'theta_prev': theta_prev,
+            'P_prev': P_prev,
+            'Phi': Phi,
+            'y_hat': y_hat,
+            'e': e,
+            'K': K,
+            'P_new': self.P,
+            'S': S
+        }
+
+        return self.theta, info
+
 
 class ForgettingFactorRLS(BaseRLS):
     """
